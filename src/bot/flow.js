@@ -253,6 +253,25 @@ function mediaTypeFromDocument(doc) {
 }
 
 /**
+ * Скачивает файл из Telegram с повторами при обрыве соединения.
+ */
+async function downloadMediaFile(bot, fileId, destDir, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await bot.downloadFile(fileId, destDir);
+    } catch (err) {
+      lastErr = err;
+      const msg = err && err.message ? err.message : String(err);
+      const retriable = /premature close|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
+      if (!retriable || i === attempts - 1) break;
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * Извлекает тип и file_id из фото, видео или документа с изображением/видео.
  * @returns {{ mediaType: 'photo'|'video', fileId: string }|null}
  */
@@ -425,8 +444,7 @@ function createBot() {
 
       const { mediaType, fileId } = resolved;
 
-      // Скачиваем файл в mediaDir, получаем путь.
-      const mediaPath = await bot.downloadFile(fileId, config.mediaDir);
+      const mediaPath = await downloadMediaFile(bot, fileId, config.mediaDir);
 
       sessions.set(chatId, {
         mediaPath,
@@ -441,6 +459,14 @@ function createBot() {
       });
     } catch (err) {
       console.error('Ошибка в обработчике message:', err);
+      const chatId = msg && msg.chat && msg.chat.id;
+      if (chatId) {
+        const hint =
+          err && err.message && /premature close|ECONNRESET|ETIMEDOUT/i.test(err.message)
+            ? 'Не удалось скачать файл с Telegram (обрыв соединения). Попробуйте ещё раз или отправьте файл поменьше.'
+            : 'Не удалось обработать сообщение. Попробуйте ещё раз.';
+        await bot.sendMessage(chatId, hint).catch(() => {});
+      }
     }
   });
 
