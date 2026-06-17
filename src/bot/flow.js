@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const https = require('https');
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('../config');
@@ -253,17 +254,50 @@ function mediaTypeFromDocument(doc) {
 }
 
 /**
+ * Скачивает URL в файл через встроенный https (стабильнее на VPS, чем request в downloadFile).
+ */
+function downloadUrlToFile(url, filePath) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(filePath);
+    const cleanup = (err) => {
+      file.destroy();
+      fs.unlink(filePath, () => reject(err));
+    };
+
+    const req = https.get(url, (res) => {
+      if (res.statusCode !== 200) {
+        cleanup(new Error(`Telegram file HTTP ${res.statusCode}`));
+        return;
+      }
+      res.pipe(file);
+      res.on('error', cleanup);
+      file.on('finish', () => file.close(() => resolve(filePath)));
+      file.on('error', cleanup);
+    });
+    req.on('error', cleanup);
+    req.setTimeout(120_000, () => {
+      req.destroy(new Error('Telegram file download timeout'));
+    });
+  });
+}
+
+/**
  * Скачивает файл из Telegram с повторами при обрыве соединения.
  */
 async function downloadMediaFile(bot, fileId, destDir, attempts = 3) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await bot.downloadFile(fileId, destDir);
+      const link = await bot.getFileLink(fileId);
+      const fileName = link.slice(link.lastIndexOf('/') + 1);
+      const filePath = path.join(destDir, `${Date.now()}_${fileName}`);
+      return await downloadUrlToFile(link, filePath);
     } catch (err) {
       lastErr = err;
       const msg = err && err.message ? err.message : String(err);
-      const retriable = /premature close|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
+      const retriable = /premature close|ECONNRESET|ETIMEDOUT|socket hang up|download timeout/i.test(
+        msg,
+      );
       if (!retriable || i === attempts - 1) break;
       await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
     }
