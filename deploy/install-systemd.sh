@@ -54,11 +54,17 @@ else
   done
 fi
 
+if [[ -f "$REPO_ROOT/.env" && ! -f "$APP_DIR/.env" ]]; then
+  cp "$REPO_ROOT/.env" "$APP_DIR/.env"
+  chmod 600 "$APP_DIR/.env"
+fi
+
+mkdir -p "$APP_DIR/data/media"
+chown -R "$SERVICE_NAME:$SERVICE_NAME" "$APP_DIR"
+
 echo "==> npm install (production)"
 cd "$APP_DIR"
 sudo -u "$SERVICE_NAME" npm install --omit=dev
-
-mkdir -p "$APP_DIR/data/media"
 chown -R "$SERVICE_NAME:$SERVICE_NAME" "$APP_DIR"
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
