@@ -1,0 +1,24 @@
+{
+  "name": "autoposting",
+  "version": "1.0.0",
+  "description": "Telegram-бот для отложенного автопостинга сторис в VK и Telegram (личная страница и канал)",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "login": "node scripts/login.js",
+    "login:qr": "node scripts/login-qr.js",
+    "vk-login": "node scripts/vk-login.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^17.4.2",
+    "input": "^1.0.1",
+    "node-cron": "^4.2.1",
+    "node-telegram-bot-api": "^0.66.0",
+    "qrcode-terminal": "^0.12.0",
+    "telegram": "^2.26.22",
+    "vk-io": "^4.10.1"
+  }
+}
