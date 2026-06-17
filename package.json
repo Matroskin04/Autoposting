@@ -8,7 +8,10 @@
     "start": "node src/index.js",
     "login": "node scripts/login.js",
     "login:qr": "node scripts/login-qr.js",
-    "vk-login": "node scripts/vk-login.js"
+    "vk-login": "node scripts/vk-login.js",
+    "docker:up": "docker compose up -d --build",
+    "docker:logs": "docker compose logs -f",
+    "docker:restart-check": "bash deploy/verify-restart.sh docker"
   },
   "license": "MIT",
   "dependencies": {

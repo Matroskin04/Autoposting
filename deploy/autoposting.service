@@ -1,0 +1,27 @@
+[Unit]
+Description=Autoposting Telegram bot (scheduled stories)
+Documentation=file:///opt/autoposting/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autoposting
+Group=autoposting
+WorkingDirectory=/opt/autoposting
+EnvironmentFile=-/opt/autoposting/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Логи в journald: journalctl -u autoposting -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autoposting
+
+[Install]
+WantedBy=multi-user.target

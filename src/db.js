@@ -75,6 +75,49 @@ function getJob(id) {
 }
 
 /**
+ * Возвращает pending-задания чата, отсортированные по времени публикации.
+ * @param {string|number} chatId
+ * @param {{ limit?: number, offset?: number }} [opts]
+ */
+function getPendingJobsByChatId(chatId, { limit = 50, offset = 0 } = {}) {
+  const rows = db
+    .prepare(
+      `SELECT * FROM jobs WHERE chat_id = ? AND status = 'pending' ORDER BY publish_at ASC LIMIT ? OFFSET ?`,
+    )
+    .all(String(chatId), limit, offset);
+  return rows.map(hydrate);
+}
+
+/**
+ * Считает pending-задания чата.
+ * @param {string|number} chatId
+ */
+function countPendingJobsByChatId(chatId) {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE chat_id = ? AND status = 'pending'`)
+    .get(String(chatId));
+  return Number(row.cnt);
+}
+
+/**
+ * Удаляет pending-задание, принадлежащее чату.
+ * @returns {{ deleted: boolean, mediaPath?: string }}
+ */
+function deletePendingJob(id, chatId) {
+  const row = db
+    .prepare(`SELECT media_path FROM jobs WHERE id = ? AND chat_id = ? AND status = 'pending'`)
+    .get(id, String(chatId));
+  if (!row) return { deleted: false };
+
+  const info = db
+    .prepare(`DELETE FROM jobs WHERE id = ? AND chat_id = ? AND status = 'pending'`)
+    .run(id, String(chatId));
+  if (info.changes !== 1) return { deleted: false };
+
+  return { deleted: true, mediaPath: row.media_path };
+}
+
+/**
  * Атомарно помечает задание как processing, только если оно ещё pending.
  * @returns {boolean} удалось ли захватить задание
  */
@@ -112,6 +155,9 @@ module.exports = {
   createJob,
   getDueJobs,
   getJob,
+  getPendingJobsByChatId,
+  countPendingJobsByChatId,
+  deletePendingJob,
   claimJob,
   setStatus,
 };

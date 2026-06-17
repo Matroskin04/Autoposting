@@ -1,17 +1,36 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('../config');
-const { createJob } = require('../db');
+const {
+  createJob,
+  getPendingJobsByChatId,
+  countPendingJobsByChatId,
+  deletePendingJob,
+} = require('../db');
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v']);
+const SCHEDULE_PAGE_SIZE = 5;
+
+const PLATFORM_SHORT = {
+  vk_group: 'ВК',
+  tg_personal: 'TG личная',
+  tg_channel: 'TG канал',
+};
+
+const MAIN_MENU_TEXT =
+  'Привет! Я помогу запланировать публикацию сторис.\n\n' +
+  'Выберите действие:';
 
 // Состояния пользователей по chatId.
 // Структура: { mediaPath, mediaType, caption, platforms: Set<string>, step }
 // step: 'platforms' | 'time' | 'await_custom_time'
 const sessions = new Map();
+// Текущая страница расписания по chatId.
+const schedulePages = new Map();
 
 /**
  * Проверяет, разрешён ли доступ пользователю.
@@ -20,6 +39,18 @@ const sessions = new Map();
 function isAllowed(userId) {
   if (!config.allowedUserIds || config.allowedUserIds.length === 0) return true;
   return config.allowedUserIds.includes(String(userId));
+}
+
+/**
+ * Inline-клавиатура главного меню.
+ */
+function buildMainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '📅 Расписание', callback_data: 'menu:schedule' }],
+      [{ text: '➕ Новая публикация', callback_data: 'menu:publish' }],
+    ],
+  };
 }
 
 /**
@@ -104,6 +135,105 @@ function platformLabels(ids) {
   return config.PLATFORMS.filter((p) => ids.includes(p.id)).map((p) => p.label);
 }
 
+function shortPlatformLabels(ids) {
+  return ids.map((id) => PLATFORM_SHORT[id] || id).join(', ');
+}
+
+function truncateCaption(caption, maxLen = 30) {
+  if (!caption) return '';
+  const s = String(caption).trim();
+  if (!s) return '';
+  if (s.length <= maxLen) return ` «${s}»`;
+  return ` «${s.slice(0, maxLen)}…»`;
+}
+
+function mediaTypeIcon(mediaType) {
+  return mediaType === 'video' ? '🎬' : '📷';
+}
+
+function formatScheduleLine(job) {
+  const platforms = shortPlatformLabels(job.platforms);
+  const caption = truncateCaption(job.caption);
+  return `#${job.id} · ${formatTime(job.publish_at)} · ${platforms} · ${mediaTypeIcon(job.media_type)}${caption}`;
+}
+
+/**
+ * Формирует текст и клавиатуру экрана расписания.
+ */
+function buildScheduleMessage(chatId, page) {
+  const total = countPendingJobsByChatId(chatId);
+  const maxPage = Math.max(0, Math.ceil(total / SCHEDULE_PAGE_SIZE) - 1);
+  const safePage = Math.min(Math.max(0, page), maxPage);
+  const offset = safePage * SCHEDULE_PAGE_SIZE;
+  const jobs = getPendingJobsByChatId(chatId, { limit: SCHEDULE_PAGE_SIZE, offset });
+
+  let text;
+  if (total === 0) {
+    text = '📅 Расписание\n\nНет запланированных публикаций.';
+  } else {
+    const lines = jobs.map(formatScheduleLine);
+    text = `📅 Расписание (${total})\n\n${lines.join('\n')}`;
+    if (maxPage > 0) {
+      text += `\n\nСтраница ${safePage + 1} из ${maxPage + 1}`;
+    }
+  }
+
+  const keyboard = [];
+  for (const job of jobs) {
+    keyboard.push([{ text: `🗑 #${job.id}`, callback_data: `schedule:del:${job.id}` }]);
+  }
+
+  const navRow = [];
+  if (safePage > 0) {
+    navRow.push({ text: '◀️', callback_data: `schedule:page:${safePage - 1}` });
+  }
+  if (safePage < maxPage) {
+    navRow.push({ text: '▶️', callback_data: `schedule:page:${safePage + 1}` });
+  }
+  if (navRow.length) keyboard.push(navRow);
+
+  if (total === 0) {
+    keyboard.push([{ text: '➕ Новая публикация', callback_data: 'menu:publish' }]);
+  }
+  keyboard.push([{ text: '◀️ В меню', callback_data: 'menu:home' }]);
+
+  schedulePages.set(chatId, safePage);
+  return { text, reply_markup: { inline_keyboard: keyboard }, page: safePage };
+}
+
+async function sendMainMenu(bot, chatId) {
+  await bot.sendMessage(chatId, MAIN_MENU_TEXT, {
+    reply_markup: buildMainMenuKeyboard(),
+  });
+}
+
+async function showSchedule(bot, chatId, page, { messageId } = {}) {
+  const { text, reply_markup } = buildScheduleMessage(chatId, page);
+  const opts = { reply_markup };
+
+  if (messageId) {
+    try {
+      await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...opts });
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      if (!msg.includes('message is not modified')) {
+        await bot.sendMessage(chatId, text, opts);
+      }
+    }
+  } else {
+    await bot.sendMessage(chatId, text, opts);
+  }
+}
+
+function deleteJobMedia(mediaPath) {
+  if (!mediaPath) return;
+  fs.unlink(mediaPath, (err) => {
+    if (err) {
+      console.error('[bot] Не удалось удалить медиафайл:', err.message);
+    }
+  });
+}
+
 /**
  * Определяет тип медиа по документу (файл, отправленный без сжатия).
  * @returns {'photo'|'video'|null}
@@ -148,7 +278,7 @@ function resolveMediaFromMessage(msg) {
 async function finalizeJob(bot, chatId, session, publishAt) {
   const platforms = Array.from(session.platforms);
 
-  createJob({
+  const jobId = createJob({
     userId: chatId,
     chatId,
     mediaPath: session.mediaPath,
@@ -163,7 +293,7 @@ async function finalizeJob(bot, chatId, session, publishAt) {
   const labels = platformLabels(platforms).join(', ');
   await bot.sendMessage(
     chatId,
-    `✅ Готово! Запланировано.\n\n` +
+    `✅ Готово! Запланировано (#${jobId}).\n\n` +
       `Площадки: ${labels}\n` +
       `Время публикации: ${formatTime(publishAt)}`,
   );
@@ -235,14 +365,7 @@ function createBot() {
         await bot.sendMessage(chatId, 'Извините, у вас нет доступа к этому боту.');
         return;
       }
-      await bot.sendMessage(
-        chatId,
-        'Привет! Я помогу запланировать публикацию сторис.\n\n' +
-          '1. Пришлите фото или видео (можно с подписью или файлом-документом).\n' +
-          '2. Выберите площадки для публикации.\n' +
-          '3. Укажите время публикации.\n\n' +
-          'Отправьте медиа, чтобы начать.',
-      );
+      await sendMainMenu(bot, chatId);
     } catch (err) {
       console.error('Ошибка в /start|/help:', err);
     }
@@ -271,7 +394,8 @@ function createBot() {
           if (publishAt === null) {
             await bot.sendMessage(
               chatId,
-              'Не понял формат. Пришлите дату и время как «ГГГГ-ММ-ДД ЧЧ:ММ», например 2026-06-18 09:30.',
+              'Не понял формат. Пришлите дату и время как «ГГГГ-ММ-ДД ЧЧ:ММ», например:\n\n<code>2026-06-18 09:30</code>',
+              { parse_mode: 'HTML' },
             );
             return;
           }
@@ -332,10 +456,66 @@ function createBot() {
         return;
       }
 
+      // Главное меню.
+      if (data === 'menu:home') {
+        await bot.answerCallbackQuery(query.id);
+        try {
+          await bot.editMessageText(MAIN_MENU_TEXT, {
+            chat_id: chatId,
+            message_id: msg.message_id,
+            reply_markup: buildMainMenuKeyboard(),
+          });
+        } catch {
+          await sendMainMenu(bot, chatId);
+        }
+        return;
+      }
+
+      if (data === 'menu:publish') {
+        sessions.delete(chatId);
+        await bot.answerCallbackQuery(query.id);
+        await bot.sendMessage(
+          chatId,
+          'Пришлите фото или видео (можно с подписью или файлом-документом).',
+        );
+        return;
+      }
+
+      if (data === 'menu:schedule') {
+        await bot.answerCallbackQuery(query.id);
+        await showSchedule(bot, chatId, 0);
+        return;
+      }
+
+      if (data.startsWith('schedule:page:')) {
+        const page = Number(data.slice('schedule:page:'.length)) || 0;
+        await bot.answerCallbackQuery(query.id);
+        await showSchedule(bot, chatId, page, { messageId: msg.message_id });
+        return;
+      }
+
+      if (data.startsWith('schedule:del:')) {
+        const jobId = Number(data.slice('schedule:del:'.length));
+        const result = deletePendingJob(jobId, chatId);
+        if (!result.deleted) {
+          await bot.answerCallbackQuery(query.id, { text: 'Задание не найдено' });
+          return;
+        }
+        deleteJobMedia(result.mediaPath);
+        await bot.answerCallbackQuery(query.id, { text: `Задание #${jobId} удалено` });
+
+        const total = countPendingJobsByChatId(chatId);
+        const maxPage = Math.max(0, Math.ceil(total / SCHEDULE_PAGE_SIZE) - 1);
+        const currentPage = schedulePages.get(chatId) || 0;
+        const targetPage = Math.min(currentPage, maxPage);
+        await showSchedule(bot, chatId, targetPage, { messageId: msg.message_id });
+        return;
+      }
+
       const session = sessions.get(chatId);
       if (!session) {
         await bot.answerCallbackQuery(query.id, {
-          text: 'Сессия не найдена. Пришлите медиа заново.',
+          text: 'Сессия не найдена. Пришлите медиа заново или откройте /start.',
         });
         return;
       }
@@ -377,7 +557,8 @@ function createBot() {
           session.step = 'await_custom_time';
           await bot.sendMessage(
             chatId,
-            'Пришлите дату и время в формате «ГГГГ-ММ-ДД ЧЧ:ММ» (локальное время сервера), например 2026-06-18 09:30.',
+            'Пришлите дату и время в формате «ГГГГ-ММ-ДД ЧЧ:ММ» (локальное время сервера), например:\n\n<code>2026-06-18 09:30</code>',
+            { parse_mode: 'HTML' },
           );
           return;
         }

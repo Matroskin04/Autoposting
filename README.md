@@ -8,6 +8,13 @@ Telegram-бот, который принимает фото/видео и пуб
 
 Публикация — сразу или по расписанию. Всё работает бесплатно на одном Node.js-процессе.
 
+## Использование бота
+
+Команда `/start` открывает главное меню с двумя кнопками:
+
+- **Расписание** — список запланированных (ожидающих) публикаций: время, площадки, тип медиа. Можно удалить задание кнопкой 🗑 — публикация отменяется, медиафайл удаляется с диска.
+- **Новая публикация** — пришлите фото или видео, выберите площадки и время.
+
 ## Как это устроено
 
 ```
@@ -105,23 +112,73 @@ npm run vk-login
 - **Бесплатный Telegram-аккаунт**: период сторис фиксирован (24 часа) и есть дневной лимит на число историй.
 - **Размер видео**: бот скачивает файлы через Bot API с лимитом ~20 МБ. Для коротких вертикальных клипов этого хватает.
 
-## Деплой 24/7 (бесплатно)
+## Деплой 24/7 (Oracle Cloud Free Tier)
 
-Рекомендуется **Oracle Cloud Free Tier** (always-free ARM VM):
+Рекомендуется **always-free ARM VM** в Oracle Cloud: один процесс Node.js, постоянный диск для `data/` и `.env`.
+
+### Подготовка VM (один раз)
+
+1. Создай VM (Ubuntu 22.04/24.04 или Oracle Linux), открой исходящий интернет.
+2. Установи Node.js 20+ и (для Docker-варианта) Docker Engine + Compose plugin.
+3. Клонируй репозиторий и настрой секреты:
 
 ```bash
-# на сервере
 git clone <repo> && cd autoposting
+cp env.example .env && nano .env   # BOT_TOKEN, TG_*, VK_*
 npm install
-cp env.example .env && nano .env   # заполнить
-npm run login                       # один раз, получить сессию
-# процесс-менеджер
+npm run login:qr                   # один раз: TG_STRING_SESSION в .env
+# при VK OAuth (без VK_TOKEN):
+npm run vk-login
+```
+
+Данные (`data/`) и `.env` должны лежать на постоянном диске и не попадать в git (см. `.gitignore`).
+
+### Вариант A — systemd (рекомендуется на VM без Docker)
+
+```bash
+sudo bash deploy/install-systemd.sh          # копирует в /opt/autoposting, ставит unit
+sudo systemctl start autoposting
+sudo systemctl status autoposting
+sudo journalctl -u autoposting -f
+```
+
+Проверка перезапуска:
+
+```bash
+sudo bash deploy/verify-restart.sh systemd
+```
+
+Unit-файл: `deploy/autoposting.service` (`Restart=always`, логи в journald).
+
+### Вариант B — Docker Compose
+
+```bash
+docker compose build
+docker compose up -d
+docker compose logs -f
+```
+
+Проверка перезапуска:
+
+```bash
+bash deploy/verify-restart.sh docker
+```
+
+Том `./data` монтируется в контейнер; `.env` подключается через `env_file`. Политика `restart: unless-stopped` поднимает сервис после перезагрузки хоста.
+
+### Вариант C — pm2 (альтернатива)
+
+```bash
 npm i -g pm2
 pm2 start src/index.js --name autoposting
 pm2 save && pm2 startup
 ```
 
-Данные (`data/`) и `.env` должны лежать на постоянном диске и не попадать в git (см. `.gitignore`).
+### Обновление на сервере
+
+**systemd:** `git pull`, затем `sudo bash deploy/install-systemd.sh` (пересоберёт зависимости и перезапустит).
+
+**Docker:** `git pull && docker compose up -d --build`.
 
 ## Структура проекта
 
@@ -134,7 +191,7 @@ src/
   tgClient.js         singleton GramJS-клиента (MTProto)
   vkAuth.js           VK ID: хранение и автообновление токенов
   bot/
-    flow.js           сценарий бота (приём медиа, выбор площадок и времени)
+    flow.js           сценарий бота (меню, расписание, приём медиа, выбор площадок и времени)
   publishers/
     index.js          карта площадок -> функция публикации
     vk.js             ВК-сообщество (vk-io)
@@ -143,4 +200,10 @@ src/
 scripts/
   login.js            одноразовый вход в Telegram (StringSession)
 data/                 медиа и БД (создаётся автоматически, в .gitignore)
+deploy/
+  autoposting.service systemd unit
+  install-systemd.sh  установка на VM
+  verify-restart.sh   проверка перезапуска (systemd/docker)
+Dockerfile
+docker-compose.yml
 ```
